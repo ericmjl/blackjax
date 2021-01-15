@@ -27,14 +27,16 @@ References
         Built for Modern Hardware." arXiv preprint arXiv:2002.01184 (2020).
 
 """
-from typing import Callable, NamedTuple, Tuple
+from typing import Callable, NamedTuple, Tuple, Union, Dict, List
 
 import jax
 import jax.numpy as jnp
-
 from blackjax.inference.integrators import IntegratorState
 
 __all__ = ["hmc"]
+
+
+PyTree = Union[Dict, List, Tuple]
 
 
 class HMCTrajectoryInfo(NamedTuple):
@@ -165,5 +167,78 @@ def hmc(
             initial_state,
             lambda state: (state, info),
         )
+
+    return propose
+
+
+class Trajectory(NamedTuple):
+    leftmost_state: IntegratorState
+    rightmost_state: IntegratorState
+    momentum_sum: PyTree
+
+
+def iterative_nuts(
+    integrator: Callable,
+    kinetic_energy: Callable,
+    step_size: float,
+    max_tree_depth: int = 10,
+    divergence_threshold: float = 1000,
+) -> Callable:
+    def do_keep_expanding(expansion_state) -> bool:
+        _, _, _, depth, _ = expansion_state
+        return depth < max_tree_depth
+
+    def expand_and_propose(expansion_state):
+        """Dynamic expansionm, thus return a proposal along the last state"""
+        rng_key, trajectory, proposal, depth = expansion_state
+
+        rng_key, direction_key, choice_key = jax.random.split(rng_key, 3)
+
+        # create new subtrajectory that is twice as long as the current
+        # trajectory.
+        direction = jax.random.bernoulli(direction_key)
+        start_state = jax.lax.cond(
+            direction > 0,
+            trajectory,
+            lambda trajectory: trajectory.rightmost_state,
+            trajectory,
+            lambda trajectory: trajectory.leftmost_state,
+        )
+        subtrajectory, new_proposal, stopped_early = expand_trajectory(
+            start_state, direction, 2 * depth
+        )
+
+        # merge the subtrajectory to the trajectory
+        # if subtrjectory is diverging or turning we may need to interupt the process.
+        new_trajectory = merge_trajectories(direction, trajectory, subtrajectory)
+
+        # update the proposal
+        # if subtrjectory is diverging or turning we may need to interupt the process.
+        p_update = progressive_biased_sampling(trajectory, subtrajectory)
+        do_update_proposal = jax.random.bernoulli(choice_key, p_update)
+        do_update_proposal = jnp.where(stopped_early, 0, do_update_proposal)
+        new_proposal = jax.lax.cond(
+            do_update_proposal,
+            new_proposal,
+            lambda x: x,
+            proposal,
+            lambda x: x,
+        )
+
+        return rng_key, new_trajectory, new_proposal, depth + 1
+
+    def propose(
+        rng_key: jax.random.PRNGKey, initial_state: IntegratorState
+    ) -> Tuple[IntegratorState, ProposalInfo]:
+
+        trajectory = Trajectory(initial_state, initial_state, 0)
+        proposal = (initial_state, None)
+        _, _, proposal, _ = jax.lax.while_loop(
+            do_keep_expanding,
+            expand_and_propose,
+            (rng_key, trajectory, proposal, 0),
+        )
+
+        return proposal
 
     return propose
