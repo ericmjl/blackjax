@@ -17,13 +17,6 @@ PyTree = Union[Dict, List, Tuple]
 __all__ = ["new_state", "kernel"]
 
 
-class HMCParameters(NamedTuple):
-    step_size: float = 1e-3
-    num_integration_steps: int = 30
-    inv_mass_matrix: Array = None
-    divergence_threshold: int = 1000
-
-
 class HMCInfo(NamedTuple):
     """Additional information on the HMC transition.
 
@@ -64,7 +57,13 @@ class HMCInfo(NamedTuple):
 new_state = base.new_hmc_state
 
 
-def kernel(potential_fn: Callable, parameters: HMCParameters):
+def kernel(
+    potential_fn: Callable,
+    step_size: float,
+    inverse_mass_matrix: Array,
+    num_integration_steps: int,
+    divergence_threshold: int = 1000,
+):
     """Build a HMC kernel.
 
     Parameters
@@ -79,18 +78,10 @@ def kernel(potential_fn: Callable, parameters: HMCParameters):
     A kernel that takes a rng_key and a Pytree that contains the current state
     of the chain and that returns a new state of the chain along with
     information about the transition.
+
     """
-    step_size, num_integration_steps, inv_mass_matrix, divergence_threshold = parameters
-
-    if inv_mass_matrix is None:
-        raise ValueError(
-            "Expected a value for `inv_mass_matrix`,"
-            " got None. Please specify a value when initializing"
-            " the parameters or run the window adaptation."
-        )
-
     momentum_generator, kinetic_energy_fn, _ = metrics.gaussian_euclidean(
-        inv_mass_matrix
+        inverse_mass_matrix
     )
     symplectic_integrator = integrators.velocity_verlet(potential_fn, kinetic_energy_fn)
     proposal_generator = hmc_proposal(
@@ -171,7 +162,7 @@ def hmc_proposal(
         end_state = build_trajectory(state)
         end_state = flip_momentum(end_state)
         proposal = init_proposal(state)
-        new_proposal, is_diverging = generate_proposal(proposal, end_state)
+        new_proposal, is_diverging = generate_proposal(proposal.energy, end_state)
         sampled_proposal, *info = sample_proposal(rng_key, proposal, new_proposal)
         do_accept, p_accept = info
 
